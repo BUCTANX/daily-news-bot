@@ -1,11 +1,15 @@
 name: Daily News Push
 
 on:
-  schedule:
-    # 修改为：每 15 分钟运行一次
-    - cron: '*/15 * * * *'
+  # 1. 允许手动触发
   workflow_dispatch:
-
+  # 2. 只要提交代码到 main 分支，立刻运行 (新增这个！)
+  push:
+    branches:
+      - main
+  # 3. 定时任务 (为了测试，我们先保持 15 分钟一次)
+  schedule:
+    - cron: '*/15 * * * *'
 jobs:
   run-news-bot:
     runs-on: ubuntu-latest
