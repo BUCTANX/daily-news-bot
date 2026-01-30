@@ -2,7 +2,8 @@ name: Daily News Push
 
 on:
   schedule:
-    - cron: '30 0 * * *' # 北京时间 8:30
+    # 修改为：每 15 分钟运行一次
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
