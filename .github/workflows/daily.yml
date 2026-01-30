@@ -1,39 +1,32 @@
-name: Daily News Push
+name: Test Run (Every 5 Mins)
 
 on:
-  # 1. 允许手动触发
-  workflow_dispatch:
-  # 2. 只要提交代码到 main 分支，立刻运行 (新增这个！)
-  push:
-    branches:
-      - main
-  # 3. 定时任务 (为了测试，我们先保持 15 分钟一次)
   schedule:
-    - cron: '*/15 * * * *'
+    # GitHub 最小间隔为 5 分钟，写 */1 会失效或被限流
+    - cron: '*/5 * * * *'
+  
+  # 保留手动触发，方便调试
+  workflow_dispatch:
+
 jobs:
   run-news-bot:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-          
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          
       - name: Run script
         env:
-          # 左边是 Python 代码里读取的变量名
-          # 右边是 GitHub Secrets 里的名字
           API_KEY: ${{ secrets.API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+          PYTHONUNBUFFERED: 1
         run: python main.py
