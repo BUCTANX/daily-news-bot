@@ -1,160 +1,274 @@
 import os
-import requests
-import feedparser
+import json
+import hashlib
 import smtplib
-import markdown2  # 用于将 Markdown 转为漂亮的 HTML
-from bs4 import BeautifulSoup
-from openai import OpenAI
+import feedparser
+import time
 from datetime import datetime
+from openai import OpenAI
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
+from bs4 import BeautifulSoup
 
-# ================= 1. 配置区域 =================
-# 敏感信息全部从环境变量获取，保障安全性
-# 在 PyCharm 测试时，请在 "Edit Configurations" -> "Environment variables" 中设置这些值
-# 格式: KEY=VALUE;KEY2=VALUE2
+# ================= 1. 全局配置 =================
 
-# AI 配置
+# API 和 邮件配置
 API_KEY = os.environ.get("API_KEY")
 API_BASE_URL = "https://api.deepseek.com"
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 
-# 邮件配置
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL")  # 发件人邮箱 (如: 123456@qq.com)
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")  # 邮箱授权码 (不是QQ密码！)
-RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")  # 收件人邮箱 (可以是同一个)
+HISTORY_FILE = "news_history.json"
 
-
-# ==============================================
-
-def get_hacker_news(limit=5):
-    """获取 Hacker News 热门科技新闻"""
-    print("正在抓取 Hacker News...")
-    try:
-        top_ids = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json").json()
-        content = []
-        for pid in top_ids[:limit]:
-            item = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{pid}.json").json()
-            if 'url' in item:
-                content.append(f"Title: {item['title']}\nURL: {item['url']}")
-        return "\n\n".join(content)
-    except Exception as e:
-        print(f"HN 抓取失败: {e}")
-        return ""
-
-
-def get_huggingface_papers(limit=5):
-    """获取 Hugging Face 每日 AI 论文"""
-    print("正在抓取 Hugging Face Papers...")
-    try:
-        feed = feedparser.parse("https://huggingface.co/papers/rss")
-        content = []
-        for entry in feed.entries[:limit]:
-            content.append(f"Paper: {entry.title}\nLink: {entry.link}\nSummary: {entry.summary[:150]}...")
-        return "\n\n".join(content)
-    except Exception as e:
-        print(f"HF Papers 抓取失败: {e}")
-        return ""
+# 🔥 升级后的高质量、无审查、全球化信源
+RSS_SOURCES = {
+    # 1. 核心前沿科技 (硬核、一手)
+    "Hardcore Tech": [
+        "https://news.ycombinator.com/rss",  # Hacker News (硅谷风向标)
+        "https://huggingface.co/papers/rss",  # Hugging Face Papers (最新 AI 论文)
+        "https://openai.com/news/rss.xml",  # OpenAI Blog
+        "https://www.anthropic.com/rss",  # Anthropic Blog
+    ],
+    # 2. 深度科技新闻 (行业分析)
+    "Tech News": [
+        "https://www.theverge.com/rss/index.xml",  # The Verge (高质量科技评论)
+        "https://techcrunch.com/feed/",  # TechCrunch (创投)
+    ],
+    # 3. 全球局势 (客观、中立、权威)
+    "World News": [
+        "http://feeds.bbci.co.uk/news/world/rss.xml",  # BBC World
+        "https://www.reutersagency.com/feed/?best-topics=politics&post_type=best",  # 路透社 (事实核查标准极高)
+    ],
+    # 4. 金融与市场
+    "Finance": [
+        "https://feeds.bloomberg.com/markets/news.rss",  # Bloomberg Markets
+    ],
+    # 5. 前沿科学
+    "Science": [
+        "https://www.sciencedaily.com/rss/top/science.xml",  # Science Daily
+        "https://www.nature.com/nature.rss"  # Nature Journal
+    ]
+}
 
 
-def get_github_trending():
-    """爬取 GitHub Trending"""
-    print("正在抓取 GitHub Trending...")
-    try:
-        url = "https://github.com/trending?since=daily"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, headers=headers)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        content = []
-        for row in soup.select('article.Box-row')[:5]:
-            name = row.select_one('h2 a').text.strip().replace('\n', '').replace(' ', '')
-            link = "https://github.com" + row.select_one('h2 a')['href']
-            desc_tag = row.select_one('p.col-9')
-            desc = desc_tag.text.strip() if desc_tag else "无描述"
-            content.append(f"Repo: {name}\nDesc: {desc}\nLink: {link}")
-        return "\n\n".join(content)
-    except Exception as e:
-        print(f"GitHub Trending 抓取失败: {e}")
-        return ""
+# ================= 2. 工具函数 =================
+
+def get_hash(text):
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
 
 
-def ai_summary(text_data):
-    """调用 DeepSeek 进行总结"""
-    print("正在调用 DeepSeek 进行分析...")
-    if not API_KEY:
-        return "错误：未配置 API_KEY"
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+
+def save_history(history):
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def clean_html(html_content):
+    """简单的 HTML 清洗，去除标签只留文字"""
+    if not html_content: return ""
+    soup = BeautifulSoup(html_content, "html.parser")
+    return soup.get_text()[:300].strip() + "..."  # 限制长度，节省 Token
+
+
+def fetch_rss_data():
+    """抓取所有 RSS 源"""
+    print("🌍 开始全球数据抓取...")
+    history = load_history()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # 清理 5 天前的历史记录 (保持文件精简)
+    valid_history = {k: v for k, v in history.items()
+                     if (datetime.now() - datetime.strptime(v, "%Y-%m-%d")).days < 5}
+
+    collected_items = []
+
+    # 设置请求头，防止部分网站反爬
+    feedparser.USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+
+    for category, urls in RSS_SOURCES.items():
+        print(f"  👉 正在扫描: {category}...")
+        for url in urls:
+            try:
+                # 增加超时设置
+                feed = feedparser.parse(url)
+
+                # 如果抓取失败（状态码非200）
+                if hasattr(feed, 'status') and feed.status != 200:
+                    print(f"    ⚠️ 跳过 {url} (Status: {feed.status})")
+                    continue
+
+                # 每个源只取前 3 条最新的
+                for entry in feed.entries[:3]:
+                    link = entry.link
+                    uid = get_hash(link)
+
+                    if uid in valid_history:
+                        continue
+
+                    valid_history[uid] = today_str
+
+                    # 智能获取摘要 (summary -> description -> content)
+                    raw_summary = getattr(entry, 'summary',
+                                          getattr(entry, 'description',
+                                                  getattr(entry, 'content', [{'value': ''}])[0]['value']))
+
+                    summary_text = clean_html(raw_summary)
+                    if not summary_text: summary_text = "No summary available."
+
+                    title_text = entry.title
+                    source_name = feed.feed.title if 'title' in feed.feed else "Unknown Source"
+
+                    collected_items.append({
+                        "category": category,
+                        "title": title_text,
+                        "url": link,
+                        "summary": summary_text,
+                        "source_name": source_name
+                    })
+            except Exception as e:
+                print(f"    ❌ 解析错误 {url}: {e}")
+
+    return collected_items, valid_history
+
+
+# ================= 3. AI 分析核心 (修复报错) =================
+
+def ai_analyze_report(items):
+    """DeepSeek 聚合分析"""
+    print(f"🧠 AI 正在分析 {len(items)} 条全球情报...")
+    if not items: return None
+
+    # 构建输入给 AI 的文本
+    input_text = ""
+    for i, item in enumerate(items, 1):
+        input_text += f"""
+        【{i}】类别: {item['category']} | 来源: {item['source_name']}
+        标题: {item['title']}
+        链接: {item['url']}
+        摘要: {item['summary']}
+        -----------------------------------
+        """
 
     client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
 
+    # 🎯 修复点：移除了 f-string 中的 HTML 示例变量，改用 {{}} 转义或纯文本描述
     prompt = f"""
-    你是一个专业的技术情报分析师。请阅读以下从 Hacker News, Hugging Face, GitHub 获取的原始数据：
+    你是一位具有全球视野的【高级情报分析师】。请阅读以下未经筛选的原始新闻数据。
 
-    {text_data}
+    【原始数据】
+    {input_text}
 
-    任务：
-    1. 挑选出最值得关注的 6-8 条内容。
-    2. 用中文进行总结。
-    3. 格式要求：Markdown。
-       - 每条新闻使用 `###` 标题。
-       - 标题下方必须紧跟一行 `**核心价值**：xxx` 的点评。
-       - 最后附上 `[点击查看原文](URL)` 的链接。
-    4. 语气要专业、简洁。
+    【任务目标】
+    1. 剔除无关紧要、重复或低质量的软文。
+    2. 筛选出 **最重要、最具洞察力** 的 7-9 条新闻。
+    3. 重点关注：颠覆性的 AI 技术、重大的地缘政治变动（客观视角）、关键的全球金融趋势、前沿科学突破。
+    4. 将内容翻译并总结为中文。
+
+    【输出格式要求】
+    请直接返回 HTML 代码（不要使用 Markdown 代码块标记）。
+    每条新闻请严格按照以下 HTML 结构模板生成（请将模板中的说明文字替换为实际内容）：
+
+    <div class="news-card">
+        <div class="card-header">
+            <span class="category-tag">这里填新闻类别(如: Hardcore Tech)</span>
+            <span class="source-tag">这里填来源媒体(如: Reuters)</span>
+        </div>
+        <h3 class="news-title"><a href="这里填原文URL" target="_blank">这里填中文标题</a></h3>
+        <div class="news-content">
+            <p><strong>🧐 深度解读：</strong> 用通俗、客观的语言解释该事件的核心逻辑。如果是科技新闻，解释技术原理；如果是时政，解释背景和影响。</p>
+            <p><strong>🚀 关键点：</strong> 提炼 1-2 个最值得关注的数据或事实。</p>
+        </div>
+    </div>
+
+    请确保 HTML 语法正确，不要包含 ```html ... ```。
     """
 
     try:
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
+            temperature=0.7,
+            max_tokens=4000  # 保证输出够长
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"AI 调用出错: {e}")
+        print(f"❌ AI 接口调用失败: {e}")
         return None
 
 
-def send_email(markdown_content):
-    """通过 SMTP 发送 HTML 格式邮件"""
-    print("正在构建邮件...")
-    if not SENDER_EMAIL or not EMAIL_PASSWORD:
-        print("错误：未配置邮箱信息，无法发送。")
-        return
+# ================= 4. 邮件发送 =================
 
-    # 1. 将 Markdown 转换为 HTML
-    # extras=['target-blank-links'] 可以让链接在新标签页打开
-    html_body = markdown2.markdown(markdown_content, extras=['target-blank-links'])
+def send_email(html_content):
+    print("📧 正在构建并发送邮件...")
 
-    # 2. 加上一些简单的 CSS 样式，让邮件更像一份报纸
-    full_html = f"""
+    # 极简主义 CSS 风格
+    css = """
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f4f4; padding: 20px; color: #333; }
+        .container { max-width: 680px; margin: 0 auto; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        .header { background: #000; color: #fff; padding: 30px 20px; text-align: center; }
+        .header h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: 1px; }
+        .header p { margin: 8px 0 0; font-size: 14px; color: #888; text-transform: uppercase; }
+        .content { padding: 25px; }
+
+        .news-card { margin-bottom: 30px; border-bottom: 1px solid #eaeaea; padding-bottom: 20px; }
+        .news-card:last-child { border-bottom: none; margin-bottom: 0; }
+
+        .card-header { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; color: #666; }
+        .category-tag { font-weight: bold; color: #007bff; margin-right: 8px; }
+        .source-tag { color: #999; }
+
+        .news-title { margin: 0 0 12px; font-size: 20px; line-height: 1.4; font-weight: 600; }
+        .news-title a { color: #111; text-decoration: none; border-bottom: 2px solid transparent; transition: border-color 0.2s; }
+        .news-title a:hover { border-color: #007bff; }
+
+        .news-content p { margin: 8px 0; font-size: 15px; line-height: 1.7; color: #444; text-align: justify; }
+        strong { color: #000; font-weight: 600; }
+
+        .footer { background: #f9f9f9; padding: 20px; text-align: center; font-size: 12px; color: #aaa; border-top: 1px solid #eee; }
+    </style>
+    """
+
+    html_body = f"""
     <html>
-    <head>
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; }}
-            h3 {{ color: #2c3e50; border-bottom: 1px solid #eaeaea; padding-bottom: 5px; margin-top: 20px; }}
-            a {{ color: #0366d6; text-decoration: none; }}
-            strong {{ color: #d73a49; }}
-            .footer {{ margin-top: 30px; font-size: 12px; color: #999; text-align: center; }}
-        </style>
-    </head>
+    <head>{css}</head>
     <body>
-        <h2>🚀 每日科技情报 ({datetime.now().strftime('%Y-%m-%d')})</h2>
-        {html_body}
-        <div class="footer">Powered by DeepSeek & GitHub Actions</div>
+        <div class="container">
+            <div class="header">
+                <h1>GLOBAL INSIGHTS</h1>
+                <p>{datetime.now().strftime('%Y.%m.%d')} | TECH & WORLD</p>
+            </div>
+            <div class="content">
+                {html_content}
+            </div>
+            <div class="footer">
+                Served by DeepSeek AI & GitHub Actions
+            </div>
+        </div>
     </body>
     </html>
     """
 
-    # 3. 构建邮件对象
-    message = MIMEText(full_html, 'html', 'utf-8')
-    message['From'] = formataddr(("TechBot", SENDER_EMAIL))
-    message['To'] = formataddr(("Master", RECEIVER_EMAIL))
-    message['Subject'] = Header(f"每日科技情报 - {datetime.now().strftime('%m-%d')}", 'utf-8')
+    msg = MIMEText(html_body, 'html', 'utf-8')
+    msg['From'] = formataddr(("TechBot Pro", SENDER_EMAIL))
+    msg['To'] = formataddr(("Master", RECEIVER_EMAIL))
+    msg['Subject'] = Header(f"🌍 全球情报: {datetime.now().strftime('%m-%d')} 核心简报", 'utf-8')
 
     try:
-        # 4. 连接 QQ 邮箱 SMTP 服务器
         server = smtplib.SMTP_SSL("smtp.qq.com", 465)
         server.login(SENDER_EMAIL, EMAIL_PASSWORD)
-        server.sendmail(SENDER_EMAIL, [RECEIVER_EMAIL], message.as_string())
+        server.sendmail(SENDER_EMAIL, [RECEIVER_EMAIL], msg.as_string())
         server.quit()
         print("✅ 邮件发送成功！")
     except Exception as e:
@@ -162,25 +276,20 @@ def send_email(markdown_content):
 
 
 if __name__ == "__main__":
-    # 1. 抓取数据
-    data_sources = []
+    # 1. 抓取
+    items, new_history = fetch_rss_data()
 
-    hn_data = get_hacker_news()
-    if hn_data: data_sources.append(f"【Hacker News】\n{hn_data}")
+    if not items:
+        print("😴 无新内容 (All caught up)")
+        exit(0)
 
-    hf_data = get_huggingface_papers()
-    if hf_data: data_sources.append(f"【Hugging Face Papers】\n{hf_data}")
+    print(f"📊 收集到 {len(items)} 条原始数据，准备分析...")
 
-    gh_data = get_github_trending()
-    if gh_data: data_sources.append(f"【GitHub Trending】\n{gh_data}")
+    # 2. AI 分析
+    report = ai_analyze_report(items)
 
-    # 2. AI 处理
-    if data_sources:
-        all_text = "\n\n".join(data_sources)
-        report = ai_summary(all_text)
-
-        if report:
-            # 3. 发送邮件
-            send_email(report)
-    else:
-        print("今日未抓取到数据，跳过执行。")
+    if report:
+        # 3. 发送
+        send_email(report)
+        # 4. 保存状态
+        save_history(new_history)
