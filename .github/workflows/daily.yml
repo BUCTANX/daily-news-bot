@@ -1,39 +1,46 @@
-name: Daily News Push
+name: Universal Daily News
 
 on:
-  # 每天 UTC 0:00 运行 (等于北京时间早上 8:00)
   schedule:
+    # 每天北京时间早上 8:00 (UTC 00:00)
     - cron: '0 0 * * *'
-  
-  # 保留这个，万一哪天想手动测试还能用
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动点按钮运行测试
 
-
+# ⚠️ 关键权限：允许 Action 写入仓库（为了保存历史记录）
+permissions:
+  contents: write
 
 jobs:
-  run-news-bot:
+  run-bot:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          
-      - name: Run script
-        env:
-          API_KEY: ${{ secrets.API_KEY }}
-          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-          # 依然推荐保留这个，方便在 Actions 页面看实时日志
-          PYTHONUNBUFFERED: 1
-        run: python main.py
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Run Universal Bot
+      env:
+        # 这里的 secrets 需要在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中设置
+        API_KEY: ${{ secrets.API_KEY }}
+        SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+      run: python universal_bot.py
+
+    - name: Commit History Changes
+      # 如果 news_history.json 发生变化，则提交回仓库
+      run: |
+        git config --global user.name 'NewsBot Action'
+        git config --global user.email 'action@github.com'
+        git add news_history.json
+        # 只有当有差异时才提交，避免报错
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update news history [skip ci]" && git push)
