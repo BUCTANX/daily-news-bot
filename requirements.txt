@@ -1,5 +1,6 @@
 requests
-beautifulsoup4
-openai
 feedparser
+openai
 markdown2
+jinja2
+PyGithub
