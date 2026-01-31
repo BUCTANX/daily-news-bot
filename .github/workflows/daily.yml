@@ -34,7 +34,7 @@ jobs:
         SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-      run: python universal_bot.py
+      run: python main.py
 
     - name: Commit History Changes
       # 如果 news_history.json 发生变化，则提交回仓库
